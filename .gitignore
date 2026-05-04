@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Operating System Files
+.DS_Store
+.Trash/
+Thumbs.db
+
+# My IDE (VS Code specific)
+.vscode/
+
+# Application-specific ignored files (CRITICAL for your project)
+settings.json
+*.log
+Cookies.txt
+bin/         # This is the line that should ignore the bin folder
+ffmpeg.exe   # Adding these for extra caution if they were at root
+ffplay.exe
+ffprobe.exe
+yt-dlp.exe
