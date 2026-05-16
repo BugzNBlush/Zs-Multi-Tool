@@ -4,11 +4,12 @@ import json
 import os
 import sys
 import logging
+import settings_manager # Import settings_manager for consistent config path
 
 gl_dm_logger = logging.getLogger(__name__)
 
 class GameLoaderDataManager:
-    def __init__(self): # CORRECT: No app_settings here, it manages its own config
+    def __init__(self):
         self.games = []
         self.config_file = "game_loader_config.json"
         self._load_games()
@@ -16,28 +17,19 @@ class GameLoaderDataManager:
     def _get_config_path(self):
         """
         Returns the correct path to the game_loader_config.json file.
-        Uses AppData/Local for PyInstaller --onefile exe, else current dir (in modules folder).
+        Uses the user-specific application data directory determined by settings_manager.
         """
-        if getattr(sys, 'frozen', False): # Check if running as a bundled executable
-            # For Windows, save to AppData/Local
-            app_data_dir = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'MultiFunctionalHub_GameLoader')
-            os.makedirs(app_data_dir, exist_ok=True) # Ensure directory exists
-            path = os.path.join(app_data_dir, self.config_file)
-            gl_dm_logger.debug(f"Frozen app GameLoader config path: {path}")
-            return path
-        else:
-            # During development, save in the modules folder
-            # This makes it easy to find and manage config during dev
-            module_dir = os.path.dirname(os.path.abspath(__file__))
-            path = os.path.join(module_dir, self.config_file)
-            gl_dm_logger.debug(f"Dev GameLoader config path: {path}")
-            return path
+        # Use the centralized user config directory
+        user_app_config_dir = settings_manager.get_user_config_dir()
+        path = os.path.join(user_app_config_dir, self.config_file)
+        gl_dm_logger.debug(f"GameLoader config path determined: {path}")
+        return path
 
     def _load_games(self):
         config_full_path = self._get_config_path()
         if os.path.exists(config_full_path):
             try:
-                with open(config_full_path, 'r') as f:
+                with open(config_full_path, 'r', encoding='utf-8') as f: # Added encoding
                     self.games = json.load(f)
                 gl_dm_logger.info(f"Loaded game list from {config_full_path}.")
             except json.JSONDecodeError:
@@ -53,7 +45,9 @@ class GameLoaderDataManager:
     def _save_games(self):
         save_path = self._get_config_path()
         try:
-            with open(save_path, 'w') as f:
+            # Ensure the directory exists before saving
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            with open(save_path, 'w', encoding='utf-8') as f: # Added encoding
                 json.dump(self.games, f, indent=4)
             gl_dm_logger.info(f"Saved game list to {save_path}.")
         except Exception as e:

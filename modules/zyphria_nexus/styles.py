@@ -176,3 +176,8 @@ def setup_styles(root):
     root.option_add('*TCombobox*Listbox.foreground', fg_white)
     root.option_add('*TCombobox*Listbox.selectBackground', hologram_glow)
     root.option_add('*TCombobox*Listbox.selectForeground', bg_dark)
+
+# NEW: Function to return available themes
+def get_all_themes():
+    """Returns a list of all available themes. Currently, only 'Hologram HUD' is explicitly styled."""
+    return ["Hologram HUD"]

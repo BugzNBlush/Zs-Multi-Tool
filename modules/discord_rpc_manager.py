@@ -1,4 +1,3 @@
-# modules/discord_rpc_manager.py
 import time
 import logging
 import threading
@@ -46,7 +45,7 @@ class DiscordRPCManager:
         
         # Set a default "initial" activity when the app starts
         self.update_activity(details="Starting Up", state="Idle", 
-                             large_image="app_logo", large_text="Zyphria Nexus Multi Use Tool", 
+                             large_image="app_logo", large_text=self.main_app_instance.base_title, # Use base_title
                              start=int(time.time()))
 
     def stop_rpc(self):
@@ -89,13 +88,13 @@ class DiscordRPCManager:
 
         # Discord requires `details` for Rich Presence to show up properly
         if "details" not in self.current_activity or not self.current_activity["details"]:
-            self.current_activity["details"] = "Using Zyphria Nexus"
+            self.current_activity["details"] = f"Using {self.main_app_instance.base_title}" # Use base_title
 
         # Ensure large_image and large_text are always present for the app itself
         if "large_image" not in self.current_activity:
             self.current_activity["large_image"] = "app_logo" # Default app logo asset name
         if "large_text" not in self.current_activity:
-            self.current_activity["large_text"] = "Zyphria Nexus Multi Use Tool"
+            self.current_activity["large_text"] = self.main_app_instance.base_title # Use base_title
 
         self._set_activity_internal(self.current_activity)
 

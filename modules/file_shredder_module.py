@@ -1,10 +1,14 @@
-# modules/file_shredder_module.py
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import random
 import threading
 import logging
+import time # For Discord RPC timestamps
+import settings_manager # For APP_NAME and default settings
+
+# Import theme colors for consistency if needed, e.g., for danger button
+from modules.zyphria_nexus.styles import text_highlight_color, bg_dark, fg_white
 
 file_shredder_logger = logging.getLogger(__name__)
 
@@ -20,14 +24,17 @@ class FileShredderModule(ttk.Frame):
         self.total_bytes_to_shred = 0
         self.bytes_shredded_current_session = 0
         
-        # Tkinter variables
-        self.num_passes_var = tk.IntVar(value=3) # Default to 3 passes (DoD 5220.22-M like)
+        # Tkinter variables - load from app_settings with fallback to DEFAULT_SETTINGS
+        shredder_settings = self.app_settings.get("file_shredder_module", settings_manager.DEFAULT_SETTINGS["file_shredder_module"])
+        self.num_passes_var = tk.IntVar(value=shredder_settings.get("num_passes", settings_manager.DEFAULT_SETTINGS["file_shredder_module"]["num_passes"]))
+        
         self.shredding_progress_var = tk.DoubleVar(value=0)
         self.shredding_status_var = tk.StringVar(value="Ready to shred files.")
 
         self.create_widgets()
         file_shredder_logger.info("FileShredderModule initialized.")
         self.main_app_instance.update_status_message("File Shredder module loaded.", level="info")
+        self._update_discord_rpc() # Initial RPC update
 
     def create_widgets(self):
         # Frame for file/folder selection
@@ -35,7 +42,7 @@ class FileShredderModule(ttk.Frame):
         selection_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.shred_listbox = tk.Listbox(selection_frame, height=10, selectmode=tk.EXTENDED, 
-                                        bg="#2A2A2A", fg="#00FFFF", selectbackground="#007BFF", activestyle="none")
+                                        bg=bg_dark, fg=fg_white, selectbackground=text_highlight_color, activestyle="none")
         self.shred_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         list_scroll = ttk.Scrollbar(selection_frame, command=self.shred_listbox.yview)
@@ -55,7 +62,7 @@ class FileShredderModule(ttk.Frame):
         options_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Label(options_frame, text="Number of Passes:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
-        ttk.Spinbox(options_frame, from_=1, to_=10, textvariable=self.num_passes_var, wrap=True).grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        ttk.Spinbox(options_frame, from_=1, to_=10, textvariable=self.num_passes_var, wrap=True, state="readonly").grid(row=0, column=1, padx=5, pady=2, sticky="ew") # Made spinbox readonly
         options_frame.grid_columnconfigure(1, weight=1)
 
         self.shred_button = ttk.Button(options_frame, text="SHRED SELECTED FILES/FOLDERS", command=self._confirm_shred, style="Danger.TButton")
@@ -86,6 +93,7 @@ class FileShredderModule(ttk.Frame):
                     self.shred_listbox.insert(tk.END, f"[FILE] {f}")
                     file_shredder_logger.info(f"Added file for shredding: {f}")
             self.main_app_instance.update_status_message(f"Added {len(files)} file(s) for shredding.", level="info")
+            self._update_discord_rpc()
 
     def _add_folders(self):
         folders = filedialog.askdirectory(parent=self, title="Select Folder(s) to Shred")
@@ -99,6 +107,7 @@ class FileShredderModule(ttk.Frame):
                     self.shred_listbox.insert(tk.END, f"[FOLDER] {folder}")
                     file_shredder_logger.info(f"Added folder for shredding: {folder}")
             self.main_app_instance.update_status_message(f"Added {len(folders)} folder(s) for shredding.", level="info")
+            self._update_discord_rpc()
 
     def _remove_selected(self):
         selected_indices = self.shred_listbox.curselection()
@@ -111,6 +120,7 @@ class FileShredderModule(ttk.Frame):
             self.shred_listbox.delete(index)
             file_shredder_logger.info(f"Removed item from shred list: {removed_item[0]}")
         self.main_app_instance.update_status_message(f"Removed {len(selected_indices)} item(s) from shred list.", level="info")
+        self._update_discord_rpc()
 
     def _clear_list(self):
         if messagebox.askyesno("Confirm Clear", "Are you sure you want to clear the entire list of items to shred?", parent=self):
@@ -118,6 +128,7 @@ class FileShredderModule(ttk.Frame):
             self.shred_listbox.delete(0, tk.END)
             self.main_app_instance.update_status_message("Cleared all items from shred list.", level="info")
             file_shredder_logger.info("Cleared all items from shred list.")
+            self._update_discord_rpc()
 
     def _confirm_shred(self):
         if not self.files_to_shred:
@@ -147,6 +158,7 @@ class FileShredderModule(ttk.Frame):
         self.shredding_status_var.set("Enumerating files to shred...")
         self.main_app_instance.update_status_message("Starting secure deletion process...", level="info")
         file_shredder_logger.info("Starting secure deletion process.")
+        self._update_discord_rpc() # Update RPC to indicate shredding in progress
 
         shred_thread = threading.Thread(target=self._perform_shredding_logic, daemon=True)
         shred_thread.start()
@@ -224,17 +236,15 @@ class FileShredderModule(ttk.Frame):
 
         if file_size == 0:
             os.remove(filepath)
-            self.bytes_shredded_current_session += num_passes * file_size # Account for progress
+            # self.bytes_shredded_current_session += num_passes * file_size # Account for progress (0 for empty file)
             self.after(0, lambda: self.shredding_progress_var.set(self.bytes_shredded_current_session))
             file_shredder_logger.info(f"Removed empty file: {filepath}")
             return
             
-        # Standard overwriting patterns (DoD 5220.22-M inspiration)
-        patterns = [b'\x00', b'\xFF', os.urandom(chunk_size)] # Zeros, ones, then random
-        
         for pass_num in range(num_passes):
-            current_pattern_chunk = patterns[pass_num % len(patterns)] if pass_num < len(patterns) else os.urandom(chunk_size)
-
+            # Generate truly random data for each pass
+            random_data_chunk = os.urandom(chunk_size) 
+            
             try:
                 with open(filepath, 'r+b') as f: # Open for read/write, binary
                     f.seek(0) # Go to beginning of file
@@ -242,19 +252,15 @@ class FileShredderModule(ttk.Frame):
                     while bytes_written_this_pass < file_size:
                         bytes_to_write = min(chunk_size, file_size - bytes_written_this_pass)
                         
-                        if current_pattern_chunk is patterns[2]:
-                            data_to_write = os.urandom(bytes_to_write)
-                        else:
-                            data_to_write = current_pattern_chunk * (bytes_to_write // len(current_pattern_chunk))
-                            if bytes_to_write % len(current_pattern_chunk) != 0:
-                                data_to_write += current_pattern_chunk[:bytes_to_write % len(current_pattern_chunk)]
+                        # Use generated random data, truncated if needed
+                        data_to_write = random_data_chunk[:bytes_to_write]
                         
                         f.write(data_to_write)
                         f.flush()
-                        os.fsync(f.fileno())
+                        os.fsync(f.fileno()) # Ensure data is written to physical disk
                         
                         bytes_written_this_pass += bytes_to_write
-                        self.bytes_shredded_current_session += bytes_to_write
+                        self.bytes_shredded_current_session += bytes_to_write # Update total shred progress
                         self.after(0, lambda: self.shredding_progress_var.set(self.bytes_shredded_current_session))
                 file_shredder_logger.debug(f"Pass {pass_num + 1}/{num_passes} completed for '{filepath}'")
             except OSError as e:
@@ -264,12 +270,14 @@ class FileShredderModule(ttk.Frame):
 
         # Final step: Rename file multiple times then delete
         dir_name, base_name = os.path.split(filepath)
-        for _ in range(5):
+        for _ in range(5): # Renames 5 times
             try:
-                new_name = ''.join(random.choice('0123456789abcdefghijklmnopqrstuvwxyz') for i in range(len(base_name)))
+                new_name_len = len(base_name)
+                # Generate a random alphanumeric string for the new name
+                new_name = ''.join(random.choice('0123456789abcdefghijklmnopqrstuvwxyz') for _ in range(new_name_len))
                 os.rename(filepath, os.path.join(dir_name, new_name))
                 filepath = os.path.join(dir_name, new_name)
-            except OSError:
+            except OSError: # If rename fails (e.g., file in use), just try to delete
                 break
         
         try:
@@ -287,9 +295,11 @@ class FileShredderModule(ttk.Frame):
 
         if not failed_shreds:
             final_message = f"Secure deletion complete! {files_shredded_count} file(s) shredded successfully."
-            level = "success"
+            self.after(0, lambda: messagebox.showinfo("Shredding Complete", final_message, parent=self.winfo_toplevel()))
+            level = "info"
         else:
             final_message = f"Shredding completed with {len(failed_shreds)} error(s). {files_shredded_count} file(s) shredded. Check logs for details."
+            self.after(0, lambda: messagebox.showwarning("Shredding with Errors", final_message, parent=self.winfo_toplevel()))
             level = "warning"
         
         self.after(0, lambda: self.shredding_status_var.set(final_message))
@@ -297,13 +307,81 @@ class FileShredderModule(ttk.Frame):
         file_shredder_logger.info(final_message)
         if failed_shreds:
             file_shredder_logger.warning(f"Files that failed to shred: {failed_shreds}")
+        
+        self._update_discord_rpc() # Update RPC after shredding is complete
+
+    # --- Discord Rich Presence Integration ---
+    def _update_discord_rpc(self):
+        if self.main_app_instance.discord_rpc_manager:
+            rpc_data = self.get_discord_rpc_status()
+            rpc_buttons = [
+                {"label": "GitHub Repo", "url": "https://github.com/BugzNBlush/Zyphria-Nexus-Multi-Use-Tool"},
+                {"label": "Support Discord", "url": "https://discord.gg/vSX49HJMHS"}
+            ]
+            self.main_app_instance.discord_rpc_manager.update_activity(
+                details=rpc_data["details"],
+                state=rpc_data["state"],
+                large_image=rpc_data["large_image"],
+                large_text=rpc_data["large_text"],
+                small_image=rpc_data["small_image"],
+                small_text=rpc_data["small_text"],
+                start=int(time.time()), 
+                buttons=rpc_buttons
+            )
+
+    def get_discord_rpc_status(self):
+        """
+        Returns a dictionary with current details, state, and image assets for Discord Rich Presence.
+        """
+        default_rpc = self.main_app_instance.get_discord_rpc_status(module_name="file_shredder")
+        
+        details_text = "Using File Shredder"
+        state_text = "Idle"
+        num_items = len(self.files_to_shred)
+
+        if self.shredding_active:
+            details_text = "Securely Deleting Files"
+            state_text = self.shredding_status_var.get()
+            if state_text.startswith("Shredding "): # Shorten progress message for RPC
+                state_text = state_text[state_text.find(':') + 2:] + "..."
+            elif state_text.startswith("Enumerating "):
+                state_text = state_text
+            else: # Fallback
+                state_text = "In Progress"
+        elif num_items > 0:
+            details_text = f"Preparing to shred {num_items} item(s)"
+            state_text = f"Configured for {self.num_passes_var.get()} passes"
+        else:
+            state_text = "Ready to select files"
+            
+        return {
+            "details": details_text,
+            "state": state_text,
+            "large_image": default_rpc.get("large_image", "shredder_icon"),
+            "large_text": "File Shredder",
+            "small_image": default_rpc.get("small_image", "app_logo"),
+            "small_text": self.main_app_instance.base_title, # Use main_app's base_title for consistency
+        }
+
 
     def get_menubar_commands(self):
         return {
             "help_commands": [
+                ("About File Shredder", self._show_about_dialog),
                 ("File Shredder Help", self._show_help_dialog),
             ]
         }
+
+    def _show_about_dialog(self):
+        messagebox.showinfo(
+            "About File Shredder",
+            f"{settings_manager.APP_NAME} File Shredder v1.0\n" # Use APP_NAME
+            "Securely deletes files and folders by overwriting their contents multiple times before deletion.\n"
+            "This makes the data unrecoverable by standard means.\n\n"
+            "Developed by Z.",
+            parent=self.winfo_toplevel()
+        )
+        file_shredder_logger.info("About dialog shown for File Shredder.")
 
     def _show_help_dialog(self):
         messagebox.showinfo(
@@ -319,7 +397,25 @@ class FileShredderModule(ttk.Frame):
         file_shredder_logger.info("File Shredder help dialog shown.")
 
     def before_hide(self, closing_app=False):
+        # If shredding is active, warn user
+        if self.shredding_active:
+            messagebox.showwarning("Shredding in Progress", "File shredding is active. Please let it complete before closing the application or switching modules.", parent=self)
+            file_shredder_logger.warning("Attempted to hide File Shredder module while shredding was active.")
+            return False # Prevent hiding if shredding is active
+
+        # Save num_passes setting
+        if "file_shredder_module" not in self.app_settings: self.app_settings["file_shredder_module"] = {}
+        self.app_settings["file_shredder_module"]["num_passes"] = self.num_passes_var.get()
+        settings_manager.save_settings(self.app_settings)
+        file_shredder_logger.info("File Shredder num_passes setting saved.")
+        self._update_discord_rpc() # Update RPC state to idle
         return True
 
     def refresh_settings_ui(self):
-        pass
+        # Reload num_passes from app_settings
+        shredder_settings = self.app_settings.get("file_shredder_module", settings_manager.DEFAULT_SETTINGS["file_shredder_module"])
+        self.num_passes_var.set(shredder_settings.get("num_passes", settings_manager.DEFAULT_SETTINGS["file_shredder_module"]["num_passes"]))
+        
+        file_shredder_logger.debug("FileShredderModule UI refreshed.")
+        self.main_app_instance.update_status_message("File Shredder UI refreshed.", level="info")
+        self._update_discord_rpc() # Update RPC after refresh

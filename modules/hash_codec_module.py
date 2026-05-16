@@ -1,39 +1,24 @@
-# modules/hash_codec_module.py
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import hashlib
+from tkinter import ttk, messagebox, filedialog
 import os
 import logging
 import threading
+import hashlib
 import base64
 import urllib.parse
 import binascii
 import codecs # For ROT13
 import html # For HTML entities
+import json # For code snippets storage
+import time # For Discord RPC timestamps
+
+# Import your theme colors and APP_NAME for consistency
+from modules.zyphria_nexus.styles import bg_dark, fg_white, text_highlight_color, hologram_glow
+import settings_manager # For APP_NAME and user config directory
 
 hash_codec_logger = logging.getLogger(__name__)
 
 class HashCodecModule(ttk.Frame):
-    MORSE_CODE_DICT = {
-        'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.',
-        'F': '..-.', 'G': '--.', 'H': '....', 'I': '..', 'J': '.---',
-        'K': '-.-', 'L': '.-..', 'M': '--', 'N': '-.', 'O': '---',
-        'P': '.--.', 'Q': '--.-', 'R': '.-.', 'S': '...', 'T': '-',
-        'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-', 'Y': '-.--',
-        'Z': '--..',
-        '0': '-----', '1': '.----', '2': '..---', '3': '...--', '4': '....-',
-        '5': '.....', '6': '-....', '7': '--...', '8': '---..', '9': '----.',
-        '.': '.-.-.-', ',': '--..--', '?': '..--..', "'": '.----.', '!': '-.-.--',
-        '/': '-..-.', '(': '-.--.', ')': '-.--.-', '&': '.-...', ':': '---...',
-        ';': '-.-.-.', '=': '-...-', '+': '.-.-.', '-': '-....-', '_': '..--.-',
-        '"': '.-..-.', '$': '...-..-', '@': '.--.-.', ' ': ' / ' # Space separator for words
-    }
-
-    # Reverse dictionary for Morse to Text conversion
-    _MORSE_TO_TEXT_TEMP = {value: key for key, value in MORSE_CODE_DICT.items() if key != ' '}
-    MORSE_TO_TEXT_DICT = {**_MORSE_TO_TEXT_TEMP, **{'': ' '}} # Add space for ' / ' delimiter
-
-
     def __init__(self, parent, app_settings, main_app_instance):
         super().__init__(parent)
         self.app_settings = app_settings
@@ -47,33 +32,46 @@ class HashCodecModule(ttk.Frame):
         self.calculated_hash_result = None
         self.calculated_hash_error = None
 
-        # Encoding Tab specific
-        self.selected_encoding_type = tk.StringVar(value="Base64") # Default encoding type
+        # Text Manipulation specific attributes
+        # No specific Tkinter Vars needed here as text is read directly from Text widgets
+        self.text_manip_status_var = tk.StringVar(value="Characters: 0, Words: 0") # Initial status
 
-        # Morse Code Tab specific (None for now)
+        # Code Snippet specific attributes
+        self.snippet_name_var = tk.StringVar()
+        self.snippet_language_var = tk.StringVar(value="Plain Text")
+        self.snippets = [] # List of dictionaries for snippets
 
         self.create_widgets()
         hash_codec_logger.debug("HashCodecModule initialized.")
+
+        # Load snippets at initialization
+        self._load_snippets()
+        self._update_snippet_list_ui() # Ensure listbox is populated after loading
+
+        self.main_app_instance.update_status_message("Hash & Codecs module loaded.", level="info")
+        self._update_discord_rpc() # Initial RPC update
 
     def create_widgets(self):
         # Create a Notebook (tabbed interface)
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(pady=10, padx=10, fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change) # Bind tab change for RPC updates
 
         # Hashing Tab
         self.hash_tab = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.hash_tab, text="Hashing")
         self._create_hashing_widgets(self.hash_tab)
 
-        # Encoding/Decoding Tab
-        self.encoding_tab = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.encoding_tab, text="Encoding/Decoding")
-        self._create_encoding_widgets(self.encoding_tab)
+        # Text Manipulation Tab
+        self.text_manip_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.text_manip_tab, text="Text Manipulation")
+        self._create_text_manipulation_widgets(self.text_manip_tab)
 
-        # Morse Code Tab (NEW)
-        self.morse_tab = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.morse_tab, text="Morse Code")
-        self._create_morse_widgets(self.morse_tab) # NEW WIDGET CREATION
+        # Code Snippets Tab
+        self.code_snippets_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.code_snippets_tab, text="Code Snippets")
+        self._create_code_snippets_widgets(self.code_snippets_tab)
+
 
     # --- Hashing Tab Widgets and Logic ---
     def _create_hashing_widgets(self, parent_frame):
@@ -81,7 +79,7 @@ class HashCodecModule(ttk.Frame):
         input_label = ttk.Label(parent_frame, text="Input (Text or File):", font=("Arial", 12, "bold"))
         input_label.pack(pady=(0, 5), anchor=tk.W)
 
-        self.hash_text_input = tk.Text(parent_frame, wrap=tk.WORD, height=8, bg="#2A2A2A", fg="#FFFFFF", insertbackground="#00FFFF", selectbackground="#3D4D4D")
+        self.hash_text_input = tk.Text(parent_frame, wrap=tk.WORD, height=8, bg=bg_dark, fg=fg_white, insertbackground=hologram_glow, selectbackground=text_highlight_color)
         self.hash_text_input.pack(fill=tk.X, pady=(0, 10))
         self.hash_text_input.bind("<KeyRelease>", self._clear_hash_file_path)
 
@@ -101,7 +99,7 @@ class HashCodecModule(ttk.Frame):
 
         ttk.Label(algo_frame, text="Algorithm:", width=15).pack(side=tk.LEFT)
         self.hash_algo_combobox = ttk.Combobox(algo_frame, textvariable=self.selected_hash_algorithm,
-                                          values=["md5", "sha1", "sha256", "sha512"], state="readonly")
+                                          values=["md5", "sha1", "sha224", "sha256", "sha512"], state="readonly")
         self.hash_algo_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.hash_algo_combobox.set("sha256")
 
@@ -113,7 +111,7 @@ class HashCodecModule(ttk.Frame):
         output_label = ttk.Label(parent_frame, text="Calculated Hash:", font=("Arial", 12, "bold"))
         output_label.pack(pady=(0, 5), anchor=tk.W)
 
-        self.hash_output = tk.Text(parent_frame, wrap=tk.WORD, height=3, state="disabled", bg="#2A2A2A", fg="#00FFFF")
+        self.hash_output = tk.Text(parent_frame, wrap=tk.WORD, height=3, state="disabled", bg=bg_dark, fg=fg_white) # Styled
         self.hash_output.pack(fill=tk.X, pady=(0, 10))
 
         # Comparison Section
@@ -155,8 +153,7 @@ class HashCodecModule(ttk.Frame):
             self.current_file_path = None
             self.hash_file_path_entry.config(state="normal")
             self.hash_file_path_entry.delete(0, tk.END)
-            self.hash_file_path_entry.insert(0, tk.END)
-            self.hash_file_path_entry.config(state="readonly")
+            self.hash_file_path_entry.config(state="readonly") # Keep it readonly but empty
             hash_codec_logger.debug("Hash file path cleared due to text input.")
             self.main_app_instance.update_status_message("Using text input for hashing.", level="info")
             self.calculated_hash_result = None
@@ -164,14 +161,26 @@ class HashCodecModule(ttk.Frame):
             self._clear_hash_output()
         self._clear_hash_compare_status()
 
-    def _clear_hash_compare_status(self, event=None):
-        self.hash_compare_status_label.config(text="")
-        hash_codec_logger.debug("Hash comparison status cleared.")
-
     def _clear_hash_output(self):
         self.hash_output.config(state="normal")
         self.hash_output.delete(1.0, tk.END)
         self.hash_output.config(state="disabled")
+
+    def _clear_hash_compare_status(self, event=None):
+        """
+        Clears the hash comparison status label.
+        Called whenever:
+        - expected hash changes
+        - input text changes
+        - new hash calculations begin
+        """
+        # Ensure the widget exists before trying to configure it
+        if hasattr(self, "hash_compare_status_label") and self.hash_compare_status_label.winfo_exists():
+            self.hash_compare_status_label.config(
+                text="",
+                foreground=fg_white
+            )
+        hash_codec_logger.debug("Hash comparison status cleared.")
 
     def _start_hash_calculation(self):
         if self.calculation_thread and self.calculation_thread.is_alive():
@@ -281,287 +290,417 @@ class HashCodecModule(ttk.Frame):
             self.main_app_instance.update_status_message("Hashes DO NOT MATCH!", level="error")
             hash_codec_logger.warning("Hashes do not match.")
 
-    # --- Encoding/Decoding Tab Widgets and Logic ---
-    def _create_encoding_widgets(self, parent_frame):
-        # Input Section
-        ttk.Label(parent_frame, text="Input Text:", font=("Arial", 12, "bold")).pack(pady=(0, 5), anchor=tk.W)
-        self.encode_input_text = tk.Text(parent_frame, wrap=tk.WORD, height=8, bg="#2A2A2A", fg="#FFFFFF", insertbackground="#00FFFF", selectbackground="#3D4D4D")
-        self.encode_input_text.pack(fill=tk.X, pady=(0, 10))
 
-        # Encoding Type Selection
-        encoding_type_frame = ttk.Frame(parent_frame)
-        encoding_type_frame.pack(fill=tk.X, pady=(0, 10))
+    # --- Text Manipulation Widgets and Logic ---
+    def _create_text_manipulation_widgets(self, parent_frame):
+        # Input/Output text areas, buttons for transformations
+        ttk.Label(parent_frame, text="Input Text:").pack(anchor="w", pady=(5,0))
+        # Apply styles to tk.Text widget
+        self.input_text_manip = tk.Text(parent_frame, height=10, wrap="word", bg=bg_dark, fg=fg_white, insertbackground=hologram_glow, selectbackground=text_highlight_color)
+        self.input_text_manip.pack(fill="x", pady=(0,5))
+        self.input_text_manip.bind("<KeyRelease>", self._auto_count_chars_words) # Bind for auto-counting
 
-        ttk.Label(encoding_type_frame, text="Encoding Type:", width=15).pack(side=tk.LEFT)
-        self.encoding_type_combobox = ttk.Combobox(encoding_type_frame, textvariable=self.selected_encoding_type,
-                                                   values=["Base64", "Base85", "URL", "Hex", "Binary", "ROT13", "HTML Entities"], state="readonly")
-        self.encoding_type_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.encoding_type_combobox.set("Base64")
+        # --- Button Frames ---
+        # First row of buttons
+        button_frame_row1 = ttk.Frame(parent_frame)
+        button_frame_row1.pack(fill="x", pady=5)
+        ttk.Button(button_frame_row1, text="To Uppercase", command=self._to_uppercase).pack(side="left", padx=2)
+        ttk.Button(button_frame_row1, text="To Lowercase", command=self._to_lowercase).pack(side="left", padx=2)
+        ttk.Button(button_frame_row1, text="Trim Whitespace", command=self._trim_whitespace).pack(side="left", padx=2)
+        ttk.Button(button_frame_row1, text="Reverse Text", command=self._reverse_text).pack(side="left", padx=2)
 
-        # Encode/Decode Buttons
-        buttons_frame = ttk.Frame(parent_frame)
-        buttons_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Button(buttons_frame, text="Encode", command=self._perform_encoding).pack(side=tk.LEFT, expand=True, padx=5)
-        ttk.Button(buttons_frame, text="Decode", command=self._perform_decoding).pack(side=tk.LEFT, expand=True, padx=5)
+        # Second row of buttons
+        button_frame_row2 = ttk.Frame(parent_frame)
+        button_frame_row2.pack(fill="x", pady=5)
+        ttk.Button(button_frame_row2, text="Remove All Whitespace", command=self._remove_all_whitespace).pack(side="left", padx=2)
+        ttk.Button(button_frame_row2, text="Remove Duplicate Lines", command=self._remove_duplicate_lines).pack(side="left", padx=2)
 
-        # Output Section
-        ttk.Label(parent_frame, text="Output Text:", font=("Arial", 12, "bold")).pack(pady=(0, 5), anchor=tk.W)
-        self.encode_output_text = tk.Text(parent_frame, wrap=tk.WORD, height=8, state="disabled", bg="#2A2A2A", fg="#00FFFF")
-        self.encode_output_text.pack(fill=tk.X, pady=(0, 10))
 
-        self.encoding_status_label = ttk.Label(parent_frame, text="", font=("Arial", 11))
-        self.encoding_status_label.pack(pady=(0, 5), anchor=tk.W)
+        ttk.Label(parent_frame, text="Output Text:").pack(anchor="w", pady=(5,0))
+        # Apply styles to tk.Text widget
+        self.output_text_manip = tk.Text(parent_frame, height=10, wrap="word", state="disabled", bg=bg_dark, fg=fg_white) # No insertbackground for disabled
+        self.output_text_manip.pack(fill="both", expand=True, pady=(0,5))
+        
+        # Output actions and status
+        output_action_frame = ttk.Frame(parent_frame)
+        output_action_frame.pack(fill="x", pady=5)
+        
+        # Display auto-updated character/word count
+        ttk.Label(output_action_frame, textvariable=self.text_manip_status_var, font=("Arial", 10), foreground=fg_white).pack(side="left", padx=2)
+        ttk.Button(output_action_frame, text="Copy Output", command=lambda: self._copy_text_manip_output()).pack(side="right", padx=2)
+        
+        # Initial count when the tab is first displayed
+        self._auto_count_chars_words()
 
-    def _perform_encoding(self):
-        self.encode_output_text.config(state="normal")
-        self.encode_output_text.delete(1.0, tk.END)
-        self.encoding_status_label.config(text="")
 
-        input_text = self.encode_input_text.get(1.0, tk.END).strip()
-        if not input_text:
-            self.encoding_status_label.config(text="Enter text to encode!", foreground="red")
-            self.main_app_instance.update_status_message("No input for encoding.", level="warning")
-            self.encode_output_text.config(state="disabled")
-            return
+    # --- Text Manipulation Methods ---
+    def _to_uppercase(self):
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        self._set_text_manip_output(content.upper())
+        self.main_app_instance.update_status_message("Text converted to uppercase.", level="info")
 
-        encoding_type = self.selected_encoding_type.get()
-        encoded_text = ""
-        try:
-            if encoding_type == "Base64":
-                encoded_text = base64.b64encode(input_text.encode('utf-8')).decode('utf-8')
-            elif encoding_type == "Base85":
-                encoded_text = base64.b85encode(input_text.encode('utf-8')).decode('ascii')
-            elif encoding_type == "URL":
-                encoded_text = urllib.parse.quote_plus(input_text)
-            elif encoding_type == "Hex":
-                encoded_text = binascii.hexlify(input_text.encode('utf-8')).decode('utf-8')
-            elif encoding_type == "Binary":
-                encoded_text = ' '.join(format(ord(char), '08b') for char in input_text)
-            elif encoding_type == "ROT13":
-                encoded_text = codecs.encode(input_text, 'rot13')
-            elif encoding_type == "HTML Entities":
-                encoded_text = html.escape(input_text)
+    def _to_lowercase(self):
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        self._set_text_manip_output(content.lower())
+        self.main_app_instance.update_status_message("Text converted to lowercase.", level="info")
+
+    def _remove_all_whitespace(self):
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        self._set_text_manip_output("".join(content.split())) # Removes all whitespace
+        self.main_app_instance.update_status_message("All whitespace removed.", level="info")
+
+    def _trim_whitespace(self):
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        lines = content.splitlines()
+        trimmed_lines = [line.strip() for line in lines]
+        self._set_text_manip_output("\n".join(trimmed_lines))
+        self.main_app_instance.update_status_message("Leading/trailing whitespace trimmed from lines.", level="info")
+
+    def _reverse_text(self):
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        reversed_content = content[::-1]
+        self._set_text_manip_output(reversed_content)
+        self.main_app_instance.update_status_message("Text reversed.", level="info")
+
+    def _remove_duplicate_lines(self):
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        lines = content.splitlines()
+        seen = set()
+        unique_lines = []
+        for line in lines:
+            if line not in seen:
+                unique_lines.append(line)
+                seen.add(line)
+        self._set_text_manip_output("\n".join(unique_lines))
+        self.main_app_instance.update_status_message("Duplicate lines removed.", level="info")
+
+    # NEW: Automatic character/word count method
+    def _auto_count_chars_words(self, event=None): # event=None for manual calls
+        content = self.input_text_manip.get("1.0", tk.END).strip()
+        char_count = len(content)
+        # Use re.findall to correctly count words, handling various separators
+        words = [word for word in content.split() if word] # Filter out empty strings from split
+        word_count = len(words)
+        
+        status_message = f"Characters: {char_count}, Words: {word_count}"
+        self.text_manip_status_var.set(status_message)
+
+
+    def _set_text_manip_output(self, text):
+        self.output_text_manip.config(state="normal")
+        self.output_text_manip.delete("1.0", tk.END)
+        self.output_text_manip.insert("1.0", text)
+        self.output_text_manip.config(state="disabled")
+
+    def _copy_text_manip_output(self):
+        content = self.output_text_manip.get("1.0", tk.END).strip()
+        if content:
+            self.clipboard_clear()
+            self.clipboard_append(content)
+            self.main_app_instance.update_status_message("Output copied to clipboard.", level="info")
+        else:
+            self.main_app_instance.update_status_message("No text to copy.", level="warning")
+
+    # --- Code Snippets Widgets and Logic ---
+    def _create_code_snippets_widgets(self, parent_frame):
+        # Listbox for snippets, entry for new, text area for content
+        ttk.Label(parent_frame, text="Snippets:").pack(anchor="w", pady=(5,0))
+        # Apply styles to tk.Listbox widget
+        self.snippet_listbox = tk.Listbox(parent_frame, height=10, bg=bg_dark, fg=fg_white, selectbackground=text_highlight_color, selectforeground="black", activestyle="none")
+        self.snippet_listbox.pack(fill="x", pady=(0,5))
+        self.snippet_listbox.bind("<<ListboxSelect>>", self._on_snippet_select)
+
+        self.snippet_name_entry = ttk.Entry(parent_frame, textvariable=self.snippet_name_var)
+        self.snippet_name_entry.pack(fill="x", pady=2)
+        # Use a more generic grey for placeholder as style.fg_white might override
+        self._setup_placeholder(self.snippet_name_entry, self.snippet_name_var, "Snippet Name", default_color='grey', active_color=fg_white)
+        
+        self.snippet_language_var = tk.StringVar(value="Plain Text")
+        ttk.Combobox(parent_frame, textvariable=self.snippet_language_var, values=["Python", "JavaScript", "HTML", "CSS", "SQL", "Bash", "JSON", "Plain Text"], state="readonly").pack(fill="x", pady=2)
+
+        # Apply styles to tk.Text widget
+        self.snippet_code_text = tk.Text(parent_frame, height=10, wrap="word", bg=bg_dark, fg=fg_white, insertbackground=hologram_glow, selectbackground=text_highlight_color)
+        self.snippet_code_text.pack(fill="both", expand=True, pady=2)
+
+        snippet_button_frame = ttk.Frame(parent_frame)
+        snippet_button_frame.pack(fill="x", pady=5)
+        ttk.Button(snippet_button_frame, text="Add/Update Snippet", command=self._add_update_snippet).pack(side="left", padx=2)
+        ttk.Button(snippet_button_frame, text="Delete Snippet", command=self._delete_snippet).pack(side="left", padx=2)
+        ttk.Button(snippet_button_frame, text="Copy Snippet Code", command=self._copy_snippet_code).pack(side="right", padx=2)
+
+    # --- Manual Placeholder Implementation for Snippet Name ---
+    def _setup_placeholder(self, entry_widget, string_var, placeholder_text, default_color, active_color):
+        def on_focus_in(event):
+            if string_var.get() == placeholder_text:
+                string_var.set("")
+                entry_widget.config(foreground=active_color) 
+        
+        def on_focus_out(event):
+            if not string_var.get():
+                string_var.set(placeholder_text)
+                entry_widget.config(foreground=default_color)
             else:
-                raise ValueError(f"Unknown encoding type: {encoding_type}")
-            
-            self.encode_output_text.insert(1.0, encoded_text)
-            self.encoding_status_label.config(text=f"Encoded successfully using {encoding_type}.", foreground="green")
-            self.main_app_instance.update_status_message(f"Encoded using {encoding_type}.", level="info")
-            hash_codec_logger.info(f"Encoded text using {encoding_type}.")
+                entry_widget.config(foreground=active_color)
 
-        except Exception as e:
-            self.encoding_status_label.config(text=f"Encoding Error: {e}", foreground="red")
-            self.main_app_instance.update_status_message(f"Encoding Error: {e}", level="error")
-            hash_codec_logger.error(f"Encoding error for {encoding_type}: {e}")
-        finally:
-            self.encode_output_text.config(state="disabled")
+        string_var.set(placeholder_text)
+        entry_widget.config(foreground=default_color)
+        entry_widget.bind("<FocusIn>", on_focus_in)
+        entry_widget.bind("<FocusOut>", on_focus_out)
 
-    def _perform_decoding(self):
-        self.encode_output_text.config(state="normal")
-        self.encode_output_text.delete(1.0, tk.END)
-        self.encoding_status_label.config(text="")
+    # --- Code Snippet Methods ---
+    def _load_snippets(self):
+        # Store snippets in the user's config directory, same as settings.json
+        snippets_file = os.path.join(settings_manager.get_user_config_dir(), "snippets.json")
 
-        input_text = self.encode_input_text.get(1.0, tk.END).strip()
-        if not input_text:
-            self.encoding_status_label.config(text="Enter text to decode!", foreground="red")
-            self.main_app_instance.update_status_message("No input for decoding.", level="warning")
-            self.encode_output_text.config(state="disabled")
-            return
+        if os.path.exists(snippets_file):
+            try:
+                with open(snippets_file, "r", encoding="utf-8") as f:
+                    self.snippets = json.load(f)
+                hash_codec_logger.info(f"Loaded snippets from {snippets_file}")
+            except Exception as e:
+                hash_codec_logger.error(f"Error loading snippets from {snippets_file}: {e}")
+                self.snippets = []
+        else:
+            self.snippets = []
 
-        encoding_type = self.selected_encoding_type.get()
-        decoded_text = ""
+    def _save_snippets(self):
+        snippets_file = os.path.join(settings_manager.get_user_config_dir(), "snippets.json")
         try:
-            if encoding_type == "Base64":
-                decoded_text = base64.b64decode(input_text.encode('utf-8')).decode('utf-8')
-            elif encoding_type == "Base85":
-                decoded_text = base64.b85decode(input_text.encode('ascii')).decode('utf-8')
-            elif encoding_type == "URL":
-                decoded_text = urllib.parse.unquote_plus(input_text)
-            elif encoding_type == "Hex":
-                decoded_text = binascii.unhexlify(input_text.encode('utf-8')).decode('utf-8')
-            elif encoding_type == "Binary":
-                # Remove spaces, then convert binary chunks to characters
-                binary_string = input_text.replace(' ', '')
-                if not all(c in '01' for c in binary_string) or len(binary_string) % 8 != 0:
-                    raise ValueError("Invalid binary string format.")
-                decoded_text = ''.join(chr(int(binary_string[i:i+8], 2)) for i in range(0, len(binary_string), 8))
-            elif encoding_type == "ROT13":
-                decoded_text = codecs.decode(input_text, 'rot13')
-            elif encoding_type == "HTML Entities":
-                decoded_text = html.unescape(input_text)
-            else:
-                raise ValueError(f"Unknown encoding type: {encoding_type}")
-
-            self.encode_output_text.insert(1.0, decoded_text)
-            self.encoding_status_label.config(text=f"Decoded successfully using {encoding_type}.", foreground="green")
-            self.main_app_instance.update_status_message(f"Decoded using {encoding_type}.", level="info")
-            hash_codec_logger.info(f"Decoded text using {encoding_type}.")
-
-        except (binascii.Error, UnicodeDecodeError, ValueError, TypeError) as e:
-            self.encoding_status_label.config(text=f"Decoding Error: Invalid {encoding_type} format. {e}", foreground="red")
-            self.main_app_instance.update_status_message(f"Decoding Error: Invalid {encoding_type} format. {e}", level="error")
-            hash_codec_logger.error(f"Decoding error for {encoding_type}: {e}")
+            # Ensure the directory exists before saving
+            os.makedirs(os.path.dirname(snippets_file), exist_ok=True)
+            with open(snippets_file, "w", encoding="utf-8") as f:
+                json.dump(self.snippets, f, indent=4)
+            hash_codec_logger.info(f"Saved snippets to {snippets_file}")
         except Exception as e:
-            self.encoding_status_label.config(text=f"Decoding Error: {e}", foreground="red")
-            self.main_app_instance.update_status_message(f"Decoding Error: {e}", level="error")
-            hash_codec_logger.error(f"Decoding error for {encoding_type}: {e}")
-        finally:
-            self.encode_output_text.config(state="disabled")
+            hash_codec_logger.error(f"Error saving snippets to {snippets_file}: {e}")
 
-    # --- NEW: Morse Code Tab Widgets and Logic ---
-    def _create_morse_widgets(self, parent_frame):
-        # Main title
-        ttk.Label(parent_frame, text=".--. .-.. .- -. -- --- .-. ... .", font=("Arial", 18, "bold")).pack(pady=10) # PLAN MORSE
-        ttk.Label(parent_frame, text="Morse Code Translator", font=("Arial", 16, "bold")).pack(pady=(0, 20))
+    def _update_snippet_list_ui(self):
+        # Only update if the snippet_listbox has been created
+        if hasattr(self, 'snippet_listbox') and self.snippet_listbox.winfo_exists():
+            self.snippet_listbox.delete(0, tk.END)
+            for snippet in self.snippets:
+                self.snippet_listbox.insert(tk.END, snippet.get("name", "Unnamed Snippet"))
 
-        # Text to Morse Section
-        text_frame = ttk.LabelFrame(parent_frame, text=" Text Input ")
-        text_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        self.morse_text_input = tk.Text(text_frame, wrap=tk.WORD, height=6, bg="#2A2A2A", fg="#FFFFFF", insertbackground="#00FFFF", selectbackground="#3D4D4D")
-        self.morse_text_input.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.morse_text_input.bind("<KeyRelease>", self._auto_text_to_morse)
-
-        ttk.Button(text_frame, text="Translate to Morse", command=self._text_to_morse_from_tab).pack(pady=5)
-
-        # Morse to Text Section
-        morse_frame = ttk.LabelFrame(parent_frame, text=" Morse Code Input ")
-        morse_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        self.morse_morse_input = tk.Text(morse_frame, wrap=tk.WORD, height=6, bg="#2A2A2A", fg="#00FFFF", insertbackground="#00FFFF", selectbackground="#3D4D4D")
-        self.morse_morse_input.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.morse_morse_input.bind("<KeyRelease>", self._auto_morse_to_text)
-
-        ttk.Button(morse_frame, text="Translate to Text", command=self._morse_to_text_from_tab).pack(pady=5)
-
-        # Status/Result Label for Morse tab
-        self.morse_status_label = ttk.Label(parent_frame, text="Ready for translation.", font=("Arial", 11))
-        self.morse_status_label.pack(fill=tk.X, padx=10, pady=10)
-
-    def _auto_text_to_morse(self, event=None):
-        """Automatically translates text to Morse as user types in the Text Input box."""
-        self._text_to_morse_from_tab()
-
-    def _auto_morse_to_text(self, event=None):
-        """Automatically translates Morse to text as user types in the Morse Code Input box."""
-        self._morse_to_text_from_tab()
-
-    def _text_to_morse_from_tab(self):
-        self.morse_status_label.config(text="")
-        text = self.morse_text_input.get(1.0, tk.END).strip().upper() # Convert to uppercase for dictionary lookup
-        if not text:
-            self.morse_morse_input.delete(1.0, tk.END)
-            self.morse_status_label.config(text="Enter text to translate.", foreground="orange")
-            return
-
-        morse_code_list = []
-        words = text.split(' ')
-        for i, word in enumerate(words):
-            word_morse_parts = []
-            for char in word:
-                if char in self.MORSE_CODE_DICT:
-                    word_morse_parts.append(self.MORSE_CODE_DICT[char])
-                # else: ignore unknown characters
-
-            if word_morse_parts: # Only add if word had translatable characters
-                morse_code_list.append(' '.join(word_morse_parts))
+    def _on_snippet_select(self, event):
+        selection = self.snippet_listbox.curselection()
+        if selection:
+            index = selection[0]
+            snippet = self.snippets[index]
             
-            # Add word separator if it's not the last word and there was a space
-            if i < len(words) - 1:
-                morse_code_list.append('/')
+            # Clear placeholder if present before setting new text
+            if self.snippet_name_var.get() == "Snippet Name" and self.snippet_name_entry['foreground'] == 'grey':
+                self.snippet_name_var.set("")
+                self.snippet_name_entry.config(foreground=fg_white) # Set to normal text color
 
-        result = ' '.join(morse_code_list).strip()
-        result = result.replace(' / / ', ' / ').replace('  ', ' ') # Clean up multiple slashes/spaces if any
+            self.snippet_name_var.set(snippet.get("name", ""))
+            self.snippet_language_var.set(snippet.get("language", "Plain Text"))
+            self.snippet_code_text.delete("1.0", tk.END)
+            self.snippet_code_text.insert("1.0", snippet.get("code", ""))
+        else:
+            # If nothing selected, reset inputs and restore placeholder
+            self.snippet_name_var.set("Snippet Name")
+            self.snippet_name_entry.config(foreground='grey') # Set to placeholder color
+            self.snippet_language_var.set("Plain Text")
+            self.snippet_code_text.delete("1.0", tk.END)
 
-        self.morse_morse_input.delete(1.0, tk.END)
-        self.morse_morse_input.insert(1.0, result)
-        self.morse_status_label.config(text="Text translated to Morse.", foreground="green")
-        self.main_app_instance.update_status_message("Text translated to Morse code.", level="info")
-        hash_codec_logger.info(f"Translated text to Morse: {text[:50]}...")
 
-    def _morse_to_text_from_tab(self):
-        self.morse_status_label.config(text="")
-        morse_text = self.morse_morse_input.get(1.0, tk.END).strip()
-        if not morse_text:
-            self.morse_text_input.delete(1.0, tk.END)
-            self.morse_status_label.config(text="Enter Morse code to translate.", foreground="orange")
+    def _add_update_snippet(self):
+        name = self.snippet_name_var.get().strip()
+        # If placeholder is still there, treat as empty
+        if name == "Snippet Name":
+            name = ""
+
+        language = self.snippet_language_var.get()
+        code = self.snippet_code_text.get("1.0", tk.END).strip()
+
+        if not name or not code:
+            messagebox.showwarning("Warning", "Snippet Name and Code cannot be empty.", parent=self)
             return
 
-        word_delimiter_token = "__WORD_SPACE__"
-        morse_text_processed = morse_text.replace(' / ', word_delimiter_token)
-        morse_chars = morse_text_processed.split(' ')
+        # Check if updating an existing snippet by name (if selected, or if name matches existing)
+        found_index = -1
+        for i, snippet in enumerate(self.snippets):
+            if snippet["name"] == name:
+                found_index = i
+                break
 
-        decoded_text_list = []
-        for morse_char in morse_chars:
-            if morse_char == word_delimiter_token:
-                decoded_text_list.append(' ')
-            elif morse_char in self.MORSE_TO_TEXT_DICT:
-                decoded_text_list.append(self.MORSE_TO_TEXT_DICT[morse_char])
-            # else: ignore unknown Morse sequences
+        if found_index != -1:
+            # Update existing snippet
+            self.snippets[found_index] = {"name": name, "language": language, "code": code}
+            self.main_app_instance.update_status_message(f"Snippet '{name}' updated.", level="info")
+        else:
+            # Add new snippet
+            self.snippets.append({"name": name, "language": language, "code": code})
+            self.main_app_instance.update_status_message(f"Snippet '{name}' added.", level="info")
+        
+        self._save_snippets()
+        self._update_snippet_list_ui()
+        # Reselect the item in the listbox if it was an update or highlight new item
+        for i, snippet in enumerate(self.snippets):
+            if snippet["name"] == name:
+                self.snippet_listbox.selection_clear(0, tk.END)
+                self.snippet_listbox.selection_set(i)
+                self.snippet_listbox.see(i)
+                break
 
-        result = ''.join(decoded_text_list)
-        self.morse_text_input.delete(1.0, tk.END)
-        self.morse_text_input.insert(1.0, result)
-        self.morse_status_label.config(text="Morse code translated to text.", foreground="green")
-        self.main_app_instance.update_status_message("Morse code translated to text.", level="info")
-        hash_codec_logger.info(f"Translated Morse code to text: {morse_text[:50]}...")
+    def _delete_snippet(self):
+        selection = self.snippet_listbox.curselection()
+        if selection:
+            index = selection[0]
+            name = self.snippets[index]["name"]
+            if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete snippet '{name}'?", parent=self):
+                del self.snippets[index]
+                self.main_app_instance.update_status_message(f"Snippet '{name}' deleted.", level="info")
+                self._save_snippets()
+                self._update_snippet_list_ui()
+                self.snippet_name_var.set("Snippet Name") # Reset to placeholder
+                self.snippet_name_entry.config(foreground='grey') # Set to placeholder color
+                self.snippet_language_var.set("Plain Text")
+                self.snippet_code_text.delete("1.0", tk.END)
+        else:
+            messagebox.showwarning("Warning", "No snippet selected to delete.", parent=self)
 
-    # --- Menu Bar Commands for the Module ---
-    def get_menubar_commands(self):
-        return {
-            "help_commands": [
-                ("About Hashing & Encoding", lambda: messagebox.showinfo("About Hashing & Encoding",
-                                                                  "Provides utilities for cryptographic hashing (MD5, SHA1, SHA256, SHA512) and various text encoding/decoding schemes (Base64, Base85, URL, Hex, Binary, ROT13, HTML Entities).\n\nUseful for data integrity verification and various text transformations.",
-                                                                  parent=self)),
-                ("Hashing Help", lambda: messagebox.showinfo("Hashing Help",
-                                                                "Hashing Tab:\n1. Enter text OR browse for a file.\n2. Select a hashing algorithm.\n3. Click 'Calculate Hash'.\n4. (Optional) Enter an expected hash and click 'Compare Hashes'.",
-                                                                parent=self)),
-                ("Encoding/Decoding Help", lambda: messagebox.showinfo("Encoding/Decoding Help",
-                                                                "Encoding/Decoding Tab:\n1. Enter text to encode/decode.\n2. Select an encoding type (Base64, Base85, URL, Hex, Binary, ROT13, HTML Entities).\n3. Click 'Encode' or 'Decode'.\n\nNote: Decoding requires valid input for the selected type.",
-                                                                parent=self)),
-                # NEW: Morse Code Help commands
-                ("About Morse Code", self._show_morse_about_dialog),
-                ("Morse Code Help", self._show_morse_help_dialog),
+    def _copy_snippet_code(self):
+        selection = self.snippet_listbox.curselection()
+        if selection:
+            index = selection[0]
+            code = self.snippets[index].get("code", "")
+            if code:
+                self.clipboard_clear()
+                self.clipboard_append(code)
+                self.main_app_instance.update_status_message("Snippet code copied to clipboard.", level="info")
+            else:
+                self.main_app_instance.update_status_message("Selected snippet has no code to copy.", level="warning")
+        else:
+            messagebox.showwarning("Warning", "No snippet selected to copy.", parent=self)
+
+    # --- Module Lifecycle & RPC ---
+    def _on_tab_change(self, event):
+        selected_tab_id = self.notebook.select()
+        selected_tab_text = self.notebook.tab(selected_tab_id, "text")
+
+        if selected_tab_text == "Code Snippets":
+            self._update_snippet_list_ui() 
+        elif selected_tab_text == "Text Manipulation": # Clear status and re-evaluate on tab change
+            self.text_manip_status_var.set("") # Clear previous manual status messages
+            self._auto_count_chars_words() # Perform initial count for the currently loaded text
+        
+        # Update RPC based on the current active tab within this module
+        self._update_discord_rpc()
+
+    def refresh_settings_ui(self):
+        # This is called when the entire HashCodecModule is brought to front
+        self._load_snippets()
+        self._update_snippet_list_ui() 
+        hash_codec_logger.debug("HashCodecModule UI refreshed.")
+        self._update_discord_rpc() # Update RPC after refresh
+
+    def _update_discord_rpc(self):
+        if self.main_app_instance.discord_rpc_manager:
+            rpc_data = self.get_discord_rpc_status()
+            rpc_buttons = [
+                {"label": "GitHub Repo", "url": "https://github.com/BugzNBlush/Zyphria-Nexus-Multi-Use-Tool"},
+                {"label": "Support Discord", "url": "https://discord.gg/vSX49HJMHS"}
             ]
+            self.main_app_instance.discord_rpc_manager.update_activity(
+                details=rpc_data["details"],
+                state=rpc_data["state"],
+                large_image=rpc_data["large_image"],
+                large_text=rpc_data["large_text"],
+                small_image=rpc_data["small_image"],
+                small_text=rpc_data["small_text"],
+                start=int(time.time()),
+                buttons=rpc_buttons
+            )
+
+    def get_discord_rpc_status(self):
+        default_rpc = self.main_app_instance.get_discord_rpc_status(module_name="hash_codec") 
+        
+        selected_tab_id = self.notebook.select()
+        selected_tab_text = self.notebook.tab(selected_tab_id, "text")
+
+        details_text = "Using Hash & Codecs Module" 
+        state_text = ""
+        large_image_asset = default_rpc.get("large_image", "hash_codec_icon") # Use the module's primary icon
+
+        if selected_tab_text == "Hashing":
+            state_text = "Generating cryptographic hashes"
+        elif selected_tab_text == "Text Manipulation":
+            state_text = "Performing text transformations"
+        elif selected_tab_text == "Code Snippets":
+            state_text = "Managing code snippets"
+        
+        return {
+            "details": details_text,
+            "state": state_text,
+            "large_image": large_image_asset,
+            "large_text": "Hash & Codecs", # Always show the combined module name here
+            "small_image": default_rpc.get("small_image", "app_logo"),
+            "small_text": self.main_app_instance.base_title, # Use main_app's base_title for consistency
         }
     
-    # NEW: Morse Code specific dialogs
-    def _show_morse_about_dialog(self):
+    def get_menubar_commands(self):
+        # Combine help commands from all functionalities
+        help_commands = [
+            ("About Hash & Codecs Module", self._show_about_dialog), # Overall about
+            ("Hashing Help", self._show_hash_codec_help),
+            ("Text Manipulation Help", self._show_text_manip_help), 
+            ("Code Snippets Help", self._show_snippets_help), 
+        ]
+        return {
+            "help_commands": help_commands
+        }
+
+    def _show_about_dialog(self):
         messagebox.showinfo(
-            "About Morse Code Translator",
-            "This module allows you to translate plain text to Morse code and vice-versa.\n\n"
-            "Morse code uses '.' (dot) and '-' (dash) to represent letters, numbers, and punctuation.\n"
-            "Letters are separated by a space, and words are separated by ' / ' (space, slash, space).\n\n"
+            "About Hash & Codecs Module", # Overall module about
+            f"This module provides tools for cryptographic hashing, general text manipulation, and code snippet management for {settings_manager.APP_NAME}.\n" # ADDED APP_NAME
             "Developed by Z.",
             parent=self.winfo_toplevel()
         )
-        hash_codec_logger.info("About dialog shown for Morse Code.")
+        hash_codec_logger.info("About dialog shown for Hash & Codecs Module.")
 
-    def _show_morse_help_dialog(self):
-        help_text = (
-            "Morse Code Translator Help Guide:\n\n"
-            "1. To translate text to Morse code:\n"
-            "   - Type your message into the 'Text Input' box.\n"
-            "   - The Morse code equivalent will appear in the 'Morse Code Input' box automatically.\n"
-            "   - Click 'Translate to Morse' to manually trigger if auto-translation is off or to confirm.\n\n"
-            "2. To translate Morse code to text:\n"
-            "   - Type or paste Morse code into the 'Morse Code Input' box.\n"
-            "   - Use a single space to separate Morse characters (e.g., `.- -...`) and ' / ' to separate words (e.g., `.... . .-.. .-.. --- / .-- --- .-. .-.. -..`).\n"
-            "   - The plain text will appear in the 'Text Input' box automatically.\n"
-            "   - Click 'Translate to Text' to manually trigger if auto-translation is off or to confirm.\n\n"
-            "Note: Only recognized characters/Morse sequences will be translated. Unknown inputs are ignored."
-        )
+    def _show_hash_codec_help(self):
         messagebox.showinfo(
-            "Morse Code Help",
-            help_text,
+            "Hashing Help",
+            "Hashing Tab:\n1. Enter text OR browse for a file.\n2. Select a hashing algorithm.\n3. Click 'Calculate Hash'.\n4. (Optional) Enter an expected hash and click 'Compare Hashes'.",
             parent=self.winfo_toplevel()
         )
-        hash_codec_logger.info("Help dialog shown for Morse Code.")
+        hash_codec_logger.info("Help dialog shown for Hashing.")
+        
+    def _show_text_manip_help(self):
+        messagebox.showinfo(
+            "Text Manipulation Help",
+            "Use this tab to perform various transformations on text.\n\n"
+            "**Automatic Counts**: Character and word counts are displayed automatically as you type in the 'Input Text' box.\n\n"
+            "**Available Actions**:\n"
+            "- **To Uppercase**: Converts all text to capital letters.\n"
+            "- **To Lowercase**: Converts all text to small letters.\n"
+            "- **Trim Whitespace**: Removes leading and trailing spaces from each line.\n"
+            "- **Reverse Text**: Reverses the order of characters in the entire text.\n"
+            "- **Remove All Whitespace**: Removes all spaces, tabs, and newlines, joining words together.\n"
+            "- **Remove Duplicate Lines**: Keeps only the first occurrence of each unique line.\n",
+            parent=self.winfo_toplevel()
+        )
+        hash_codec_logger.info("Help dialog shown for Text Manipulation.")
 
+    def _show_snippets_help(self):
+        messagebox.showinfo(
+            "Code Snippets Help",
+            "Use this tab to store and organize frequently used code snippets or text templates.\n\n"
+            "1. Enter a 'Snippet Name', select a 'Language', and paste your 'Code'.\n"
+            "2. Click 'Add/Update Snippet' to save it.\n"
+            "3. Select a snippet from the list to view/edit it, or click 'Delete Snippet' to remove it.\n"
+            "4. 'Copy Snippet Code' will put the code into your clipboard.",
+            parent=self.winfo_toplevel()
+        )
+        hash_codec_logger.info("Help dialog shown for Code Snippets.")
 
     def before_hide(self, closing_app=False):
-        # Check if hash calculation is in progress
         if self.calculation_thread and self.calculation_thread.is_alive():
             hash_codec_logger.warning("Hash calculation still in progress when module was hidden.")
             self.main_app_instance.update_status_message("Hash calculation might continue in background.", level="warning")
+        
+        self._save_snippets()
+        hash_codec_logger.info("HashCodecModule before_hide executed. Snippets saved.")
         return True

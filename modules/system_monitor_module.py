@@ -1,4 +1,3 @@
-# modules/system_monitor_module.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
@@ -8,9 +7,10 @@ import threading
 import logging
 import datetime
 import socket 
+import time # For Discord RPC timestamps
 
 from modules.zyphria_nexus.styles import bg_medium 
-# import settings_manager # REMOVED: No longer need to import settings_manager if not saving/loading this preference
+import settings_manager # Re-added for APP_NAME consistency in dialogs and RPC
 
 system_monitor_logger = logging.getLogger(__name__)
 
@@ -24,11 +24,8 @@ class SystemMonitorModule(ttk.Frame):
         self.update_id = None 
         self.refresh_interval_ms = 2000 
 
-        # --- CHANGE STARTS HERE ---
         # NEW: Always initialize as hidden (False)
         self.network_info_visible_var = tk.BooleanVar(value=False) 
-        # REMOVED: Code for loading preference from app_settings
-        # --- CHANGE ENDS HERE ---
 
         # Store a reference to the disk_frame and net_frame
         self.disk_frame = None
@@ -37,6 +34,7 @@ class SystemMonitorModule(ttk.Frame):
         self.create_widgets()
         system_monitor_logger.info("SystemMonitorModule initialized.")
         self.main_app_instance.update_status_message("System Monitor module loaded.", level="info")
+        self._update_discord_rpc() # Initial RPC update
 
     def create_widgets(self):
         self.canvas = tk.Canvas(self, bd=0, highlightthickness=0, bg=bg_medium) 
@@ -186,9 +184,9 @@ class SystemMonitorModule(ttk.Frame):
     def _initialize_disk_widgets(self, parent_frame):
         current_yview = self.canvas.yview() 
         
+        # Destroy all existing disk widgets except the main disk_frame
         for widget in parent_frame.winfo_children():
-            if widget != self.toggle_network_checkbutton and widget != self.network_details_frame: 
-                widget.destroy() 
+            widget.destroy() 
         self.disk_info_labels.clear()
 
         ttk.Label(parent_frame, text="Drive", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=5, pady=2, sticky="w")
@@ -217,6 +215,7 @@ class SystemMonitorModule(ttk.Frame):
             parent_frame.grid_rowconfigure(row + 1, weight=1) 
         
         self.after(50, self._update_scroll_region) 
+        self._update_discord_rpc() # Update RPC after disk widgets are initialized
 
     def _update_system_info(self):
         try:
@@ -305,6 +304,7 @@ class SystemMonitorModule(ttk.Frame):
         finally:
             self.update_id = self.after(self.refresh_interval_ms, self._update_system_info)
             self.after(50, lambda: self._restore_scroll_position(current_yview))
+            self._update_discord_rpc() # Update RPC with latest system stats
 
     def _restore_scroll_position(self, yview_fraction):
         if yview_fraction and self.canvas.bbox("all"):
@@ -333,14 +333,11 @@ class SystemMonitorModule(ttk.Frame):
             self.net_adapters_text.set("Network information hidden by user preference.")
 
         self.after(50, lambda: self._restore_scroll_position(current_yview))
+        self._update_discord_rpc() # Update RPC on network visibility change
 
     def _on_network_visibility_toggle(self):
         self._toggle_network_details_visibility() 
         
-        # --- CHANGE STARTS HERE ---
-        # REMOVED: Saving preference to app_settings and settings_manager.save_settings(self.app_settings)
-        # --- CHANGE ENDS HERE ---
-
         # Log the change, but don't save persistently
         should_hide_in_settings = not self.network_info_visible_var.get()
         system_monitor_logger.info(f"Network info visibility set to: {'hidden' if should_hide_in_settings else 'visible'} (session-only)")
@@ -349,12 +346,73 @@ class SystemMonitorModule(ttk.Frame):
         if self.network_info_visible_var.get():
             self._update_system_info()
 
+    # --- Discord Rich Presence Integration ---
+    def _update_discord_rpc(self):
+        if self.main_app_instance.discord_rpc_manager:
+            rpc_data = self.get_discord_rpc_status()
+            rpc_buttons = [
+                {"label": "GitHub Repo", "url": "https://github.com/BugzNBlush/Zyphria-Nexus-Multi-Use-Tool"},
+                {"label": "Support Discord", "url": "https://discord.gg/vSX49HJMHS"}
+            ]
+            self.main_app_instance.discord_rpc_manager.update_activity(
+                details=rpc_data["details"],
+                state=rpc_data["state"],
+                large_image=rpc_data["large_image"],
+                large_text=rpc_data["large_text"],
+                small_image=rpc_data["small_image"],
+                small_text=rpc_data["small_text"],
+                start=int(time.time()), 
+                buttons=rpc_buttons
+            )
+
+    def get_discord_rpc_status(self):
+        """
+        Returns a dictionary with current details, state, and image assets for Discord Rich Presence.
+        """
+        default_rpc = self.main_app_instance.get_discord_rpc_status(module_name="system_monitor")
+        
+        details_text = "Monitoring System"
+        state_text = ""
+
+        cpu_percent = psutil.cpu_percent(interval=None) # Get current CPU % for state
+        mem = psutil.virtual_memory()
+        
+        state_text = f"CPU: {cpu_percent:.1f}% | RAM: {mem.percent:.1f}%"
+
+        if self.network_info_visible_var.get():
+            details_text = "Monitoring System (Network Visible)"
+        else:
+            details_text = "Monitoring System (Network Hidden)"
+
+        return {
+            "details": details_text,
+            "state": state_text,
+            "large_image": default_rpc.get("large_image", "monitor_icon"),
+            "large_text": "System Monitor",
+            "small_image": default_rpc.get("small_image", "app_logo"),
+            "small_text": self.main_app_instance.base_title, # Use main_app's base_title for consistency
+        }
+
+
     def get_menubar_commands(self):
         return {
             "help_commands": [
+                ("About System Monitor", self._show_about_dialog),
                 ("System Monitor Help", self._show_help_dialog),
             ]
         }
+
+    def _show_about_dialog(self):
+        messagebox.showinfo(
+            "About System Monitor",
+            f"{settings_manager.APP_NAME} System Monitor v1.0\n" # Use APP_NAME
+            "Displays real-time hardware and OS information.\n"
+            "Developed by Z.\n\n"
+            "Powered by psutil.",
+            parent=self.winfo_toplevel()
+        )
+        system_monitor_logger.info("About dialog shown for System Monitor.")
+
 
     def _show_help_dialog(self):
         messagebox.showinfo(
@@ -368,12 +426,14 @@ class SystemMonitorModule(ttk.Frame):
 
     def before_hide(self, closing_app=False):
         self._stop_update_loop()
+        self._update_discord_rpc() # Update RPC to reflect module is no longer active (or changed status)
         return True
 
     def refresh_settings_ui(self):
-        # When the module is shown, the network_info_visible_var will be False (hidden) by default now.
-        # So we just trigger the normal start-up logic.
+        # This module doesn't rely on app_settings for its runtime behavior (except app_name)
+        # So, we just ensure the update loop is started and UI is consistent.
         self._start_update_loop()
         self._toggle_network_details_visibility(initial_load=True) 
         self.after(100, self._update_scroll_region) 
-        self.after(150, lambda: self._restore_scroll_position(self.canvas.yview())) 
+        self.after(150, lambda: self._restore_scroll_position(self.canvas.yview()))
+        self._update_discord_rpc() # Update RPC after refresh

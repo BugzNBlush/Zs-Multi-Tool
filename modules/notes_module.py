@@ -1,9 +1,13 @@
-# modules/notes_module.py
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 import os
 import logging
 import tkinter.font as tkfont
+import settings_manager # For APP_NAME and default settings
+import time # For Discord RPC timestamps
+
+# Import your theme colors
+from modules.zyphria_nexus.styles import bg_dark, fg_white, text_highlight_color, hologram_glow, bg_medium
 
 notes_logger = logging.getLogger(__name__)
 
@@ -17,20 +21,28 @@ class NotesModule(ttk.Frame):
         self.current_file_path = None
         self.text_changed = False # Flag to track unsaved changes
 
-        self.font_family = "Segoe UI"
-        self.font_size = 10 # Base font size
-        self.current_fg_color = "#FFFFFF" # Default text color (white)
+        # Load notes settings from app_settings with defaults
+        notes_sub_settings = self.app_settings.get("notes_module", settings_manager.DEFAULT_SETTINGS["notes_module"])
+        self.font_family = "Segoe UI" # Assuming a default font family
+        self.font_size = notes_sub_settings.get("default_font_size", settings_manager.DEFAULT_SETTINGS["notes_module"]["default_font_size"])
+        self.current_fg_color = "#FFFFFF" # Default text color (white) - used for color picker start and button
 
         self._setup_fonts()
-        self._setup_button_styles() # Will now primarily configure ttk.Style for other buttons
+        self._setup_button_styles()
 
         self.create_widgets()
         self._configure_text_tags() # Will include color tag
-        self.load_settings()
+        
         self.update_window_title_status()
         self._update_counts() # Initial call for word/char count
 
+        notes_logger.info("NotesModule initialized.")
+        self.main_app_instance.update_status_message("Notes module loaded.", level="info")
+        self.main_app_instance.after(100, self._update_discord_rpc) # Initial RPC update after widget creation is complete
+
+
     def _setup_fonts(self):
+        # Update self.base_text_font with the loaded font size
         self.base_text_font = tkfont.Font(family=self.font_family, size=self.font_size)
 
         base_family = self.base_text_font.actual("family")
@@ -44,10 +56,9 @@ class NotesModule(ttk.Frame):
 
     def _setup_button_styles(self):
         s = ttk.Style()
-        s.configure('Toggled.TButton', background='#00FFFF', foreground='black')
-        s.configure('Untoggled.TButton', background='', foreground='')
-        
-        # Removed s.map('Color.TButton', ...) as we'll use tk.Button for btn_color
+        # Ensure these styles exist or are compatible with your theme
+        s.configure('Toggled.TButton', background=text_highlight_color, foreground='black') # Brighter for "on" state
+        s.configure('Untoggled.TButton', background=bg_medium, foreground=fg_white) # Default button state
         
         self.btn_bold = None
         self.btn_italic = None
@@ -64,8 +75,6 @@ class NotesModule(ttk.Frame):
         self.text_widget.tag_configure("underline", font=self.underline_font)
 
         # Base color tag, which can be dynamically configured
-        # Note: We create specific tags like "fg_color_RRGGBB" as needed,
-        # but this base tag could be used for a default color for example.
         self.text_widget.tag_configure("fg_color", foreground=self.current_fg_color)
         notes_logger.debug("Notes module text tags configured.")
 
@@ -92,9 +101,9 @@ class NotesModule(ttk.Frame):
         self.btn_underline = ttk.Button(toolbar_frame, text="U", command=lambda: self._toggle_tag_for_selection("underline"), style='Untoggled.TButton')
         self.btn_underline.pack(side=tk.LEFT, padx=2, pady=2)
         
-        # NEW: Color Button - changed to tk.Button
+        # NEW: Color Button - changed to tk.Button (ttk.Button doesn't support direct background/foreground changes easily)
         self.btn_color = tk.Button(toolbar_frame, text="Color", command=self._choose_text_color,
-                                    background=self.current_fg_color, # Set initial background
+                                    background=self.current_fg_color, 
                                     foreground="#000000" if sum(int(self.current_fg_color[i:i+2], 16) for i in (1, 3, 5)) / 3 > 128 else "#FFFFFF",
                                     relief="raised") # Use raised relief for tk.Button to look more like ttk
         self.btn_color.pack(side=tk.LEFT, padx=2, pady=2)
@@ -105,12 +114,16 @@ class NotesModule(ttk.Frame):
         ttk.Button(toolbar_frame, text="Undo", command=self.do_undo).pack(side=tk.LEFT, padx=2, pady=2)
         ttk.Button(toolbar_frame, text="Redo", command=self.do_redo).pack(side=tk.LEFT, padx=2, pady=2)
 
+        # NEW: Remove Formatting Button
+        ttk.Button(toolbar_frame, text="Clear Format", command=self.remove_formatting).pack(side=tk.LEFT, padx=2, pady=2)
+
+
         # Text Area with Scrollbar
         text_frame = ttk.Frame(self)
         text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # Bind events for word/char count
-        self.text_widget = tk.Text(text_frame, wrap=tk.WORD, undo=True, bg="#2A2A2A", fg="#FFFFFF", insertbackground="#00FFFF", selectbackground="#3D4D4D")
+        self.text_widget = tk.Text(text_frame, wrap=tk.WORD, undo=True, bg=bg_dark, fg=fg_white, insertbackground=hologram_glow, selectbackground=text_highlight_color)
         self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         text_scroll = ttk.Scrollbar(text_frame, command=self.text_widget.yview)
@@ -118,9 +131,12 @@ class NotesModule(ttk.Frame):
         self.text_widget.config(yscrollcommand=text_scroll.set)
 
         self.text_widget.bind("<<Modified>>", self.on_text_modify)
-        self.text_widget.bind("<<Selection>>", self.update_formatting_buttons)
+        # Bind to KeyRelease to update counts and button states
+        self.text_widget.bind("<KeyRelease>", self._on_key_release_and_modify) 
+        # Bind to mouse clicks for selection changes for button state updates
         self.text_widget.bind("<ButtonRelease-1>", self.update_formatting_buttons)
-        self.text_widget.bind("<KeyRelease>", self._on_key_release_and_modify) # NEW: Unified handler
+        # Handle <<Selection>> for when selection changes via keyboard (Shift + arrow)
+        self.text_widget.bind("<<Selection>>", self.update_formatting_buttons) 
 
         # Status Bar for Notes module specific status (not global app status)
         bottom_frame = ttk.Frame(self) # NEW: Frame for status and counts
@@ -133,33 +149,37 @@ class NotesModule(ttk.Frame):
         self.count_label = ttk.Label(bottom_frame, text="Words: 0, Chars: 0", anchor=tk.E)
         self.count_label.pack(side=tk.RIGHT)
 
+        # Initial update of formatting buttons based on default state
         self.update_formatting_buttons()
 
 
     # NEW: Unified handler for KeyRelease and Modified events
     def _on_key_release_and_modify(self, event=None):
-        self.on_text_modify(event)
-        self._update_counts()
-        self.update_formatting_buttons()
+        self.on_text_modify(event) # Handle modified flag
+        self._update_counts()      # Update word/char counts
+        self.update_formatting_buttons() # Update button states
+        self._update_discord_rpc() # Update RPC on text modification
 
 
-    def load_settings(self):
-        settings = self.app_settings.get("notes_module", {})
-        # Could load default font size, family, etc. here if saved
-        pass
-
+    # No need for a load_settings directly in NotesModule as it happens in refresh_settings_ui
+    # The font size is loaded in __init__ from app_settings
     def save_settings(self):
-        # Could save default font size, family, etc. here
-        pass
+        # Save font size (and potentially other notes settings) to app_settings
+        if "notes_module" not in self.app_settings: self.app_settings["notes_module"] = {}
+        self.app_settings["notes_module"]["default_font_size"] = self.font_size
+        # No need to call settings_manager.save_settings here as it's typically called by main_app or settings_module.
+        notes_logger.debug("Notes settings updated in app_settings.")
 
     def update_window_title_status(self):
         """Updates the main application window title and this module's status label."""
         file_name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
         dirty_indicator = "*" if self.text_changed else ""
 
+        # Use main_app_instance.base_title for overall consistency
         self.main_app_instance.set_window_title(f"{self.main_app_instance.base_title} - Notes: {file_name}{dirty_indicator}")
         self.notes_status_label.config(text=f"{file_name}{dirty_indicator} - {('Unsaved Changes' if self.text_changed else 'Saved')}")
         notes_logger.debug(f"Updated notes title/status: {file_name}{dirty_indicator}")
+        self._update_discord_rpc() # Update RPC on title/status change
 
     def on_text_modify(self, event=None):
         if self.text_widget.edit_modified():
@@ -182,6 +202,7 @@ class NotesModule(ttk.Frame):
                 start = current_selection[0]
                 end = current_selection[1]
 
+                # If any part of the selection has the tag, remove it. Otherwise, add it.
                 if self.text_widget.tag_nextrange(tag_name, start, end):
                     self.text_widget.tag_remove(tag_name, start, end)
                     notes_logger.info(f"Removed {tag_name} tag from selection.")
@@ -297,7 +318,12 @@ class NotesModule(ttk.Frame):
             index_to_check = self.text_widget.index(tk.SEL_FIRST)
 
         def is_tag_active(tag_name, idx):
-            return tag_name in self.text_widget.tag_names(idx)
+            # Check if any character within the selected range (or at insert point) has the tag
+            if self.text_widget.tag_ranges(tk.SEL):
+                start_sel, end_sel = self.text_widget.tag_ranges(tk.SEL)
+                return bool(self.text_widget.tag_nextrange(tag_name, start_sel, end_sel))
+            else:
+                return tag_name in self.text_widget.tag_names(idx)
         
         # Update Bold, Italic, Underline buttons based on ttk styles
         if self.btn_bold:
@@ -307,9 +333,9 @@ class NotesModule(ttk.Frame):
         if self.btn_underline:
             self.btn_underline.config(style='Toggled.TButton' if is_tag_active("underline", index_to_check) else 'Untoggled.TButton')
         
-        # NEW: Update the color button's appearance (now using tk.Button)
+        # Update the color button's appearance (now using tk.Button)
         if self.btn_color:
-            current_fg_color_for_button = self.current_fg_color # Default to last chosen color or current default
+            current_fg_color_for_button = fg_white # Default to theme's foreground color
             
             # Check for specific color tags at the index
             for tag in self.text_widget.tag_names(index_to_check):
@@ -366,6 +392,10 @@ class NotesModule(ttk.Frame):
                 self.update_formatting_buttons() # Update button states (including color)
                 self.main_app_instance.update_status_message(f"Opened: {os.path.basename(file_path)}", level="info")
                 notes_logger.info(f"Opened notes file: {file_path}")
+            except FileNotFoundError:
+                messagebox.showerror("Error", f"File not found: {file_path}", parent=self)
+                self.main_app_instance.update_status_message(f"Error opening file: File not found.", level="error")
+                notes_logger.error(f"File not found: {file_path}")
             except Exception as e:
                 messagebox.showerror("Error", f"Could not open file: {e}", parent=self)
                 self.main_app_instance.update_status_message(f"Error opening file: {e}", level="error")
@@ -423,7 +453,55 @@ class NotesModule(ttk.Frame):
             else:
                 notes_logger.warning("User cancelled saving notes before hiding module.")
                 return False
+        self._update_discord_rpc() # Update RPC to reflect module is no longer active (or changed status)
         return True
+
+    # --- Discord Rich Presence Integration ---
+    def _update_discord_rpc(self):
+        """Helper method to update Discord RPC based on current module status."""
+        if self.main_app_instance.discord_rpc_manager:
+            rpc_data = self.get_discord_rpc_status()
+            rpc_buttons = [
+                {"label": "GitHub Repo", "url": "https://github.com/BugzNBlush/Zyphria-Nexus-Multi-Use-Tool"},
+                {"label": "Support Discord", "url": "https://discord.gg/vSX49HJMHS"}
+            ]
+            self.main_app_instance.discord_rpc_manager.update_activity(
+                details=rpc_data["details"],
+                state=rpc_data["state"],
+                large_image=rpc_data["large_image"],
+                large_text=rpc_data["large_text"],
+                small_image=rpc_data["small_image"],
+                small_text=rpc_data["small_text"],
+                start=int(time.time()), 
+                buttons=rpc_buttons
+            )
+
+    def get_discord_rpc_status(self):
+        """
+        Returns a dictionary with current details, state, and image assets for Discord Rich Presence.
+        """
+        default_rpc = self.main_app_instance.get_discord_rpc_status(module_name="notes")
+        
+        details_text = "Using Notes Module"
+        state_text = "Idle"
+
+        file_name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+        if file_name == "Untitled":
+            state_text = "Editing a new note"
+        else:
+            state_text = f"Editing: {file_name}"
+            if self.text_changed:
+                state_text += " (Unsaved)"
+        
+        return {
+            "details": details_text,
+            "state": state_text,
+            "large_image": default_rpc.get("large_image", "notes_icon"),
+            "large_text": "Notes Module",
+            "small_image": default_rpc.get("small_image", "app_logo"),
+            "small_text": self.main_app_instance.base_title, # Use main_app's base_title for consistency
+        }
+
 
     def get_menubar_commands(self):
         return {
@@ -431,6 +509,7 @@ class NotesModule(ttk.Frame):
                 ("New", self.new_file),
                 ("Open...", self.open_file),
                 ("Save", self.save_file),
+                ("Save As...", self.save_file_as), # Added Save As to menu
             ],
             "edit_commands": [
                 ("Undo", self.do_undo),
@@ -440,9 +519,24 @@ class NotesModule(ttk.Frame):
                 ("Italic", lambda: self._toggle_tag_for_selection("italic")),
                 ("Underline", lambda: self._toggle_tag_for_selection("underline")),
                 ("Text Color...", self._choose_text_color), # NEW: Text Color menu item
+                ("Clear Formatting", self.remove_formatting), # Added clear formatting to menu
             ],
             "help_commands": [
-                ("About Notes", lambda: messagebox.showinfo("About Notes Module", "A simple text editor for quick notes.\n\nNote: Formatting is not saved in .txt files.", parent=self)),
-                ("Notes Help", lambda: messagebox.showinfo("Notes Help", "Type text, use buttons to open/save. Select text to apply bolding, italics, underlining, or change color. Formatting is visual only.", parent=self))
+                ("About Notes", lambda: messagebox.showinfo("About Notes Module", f"A simple text editor for quick notes in {settings_manager.APP_NAME}.\n\nNote: Basic formatting (bold, italic, underline, color) is visual only within the editor and is not saved to plain .txt files.", parent=self)),
+                ("Notes Help", lambda: messagebox.showinfo("Notes Help", "Type text, use buttons to open/save. Select text to apply bolding, italics, underlining, or change color. Formatting is visual only within the editor and is not saved to plain .txt files.", parent=self))
             ]
         }
+
+    def refresh_settings_ui(self):
+        """Refreshes UI elements based on current app settings."""
+        notes_sub_settings = self.app_settings.get("notes_module", settings_manager.DEFAULT_SETTINGS["notes_module"])
+        new_font_size = notes_sub_settings.get("default_font_size", settings_manager.DEFAULT_SETTINGS["notes_module"]["default_font_size"])
+        
+        if new_font_size != self.font_size:
+            self.font_size = new_font_size
+            self._setup_fonts() # Re-create fonts with new size
+            self._configure_text_tags() # Re-apply tags to update font size
+            notes_logger.info(f"Notes module font size updated to: {self.font_size}")
+            self.main_app_instance.update_status_message(f"Notes font size updated to {self.font_size}.", level="info")
+        
+        self._update_discord_rpc() # Update RPC after refresh
