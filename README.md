@@ -1,6 +1,6 @@
-# Zyphria Multi Tool
+# Z's Multi Tool
 
-Zyphria Multi Tool is a powerful all-in-one desktop utility designed to bring essential tools and system management features into a single application. Whether you're managing games, monitoring system performance, handling files, or working with development utilities, Zyphria Multi Tool provides a centralized workspace for everything you need.
+Z's Multi Tool is a powerful all-in-one desktop utility designed to bring essential tools and system management features into a single application. Whether you're managing games, monitoring system performance, handling files, or working with development utilities, Zyphria Multi Tool provides a centralized workspace for everything you need.
 
 ## Features
 
@@ -103,7 +103,7 @@ Built-in Discord Rich Presence support.
 
 ## Goal
 
-Zyphria Multi Tool aims to eliminate the need for multiple separate applications by combining game management, file utilities, system monitoring, media playback, and developer tools into one easy-to-use platform.
+Z's Multi Tool aims to eliminate the need for multiple separate applications by combining game management, file utilities, system monitoring, media playback, and developer tools into one easy-to-use platform.
 
 ## Support
 
